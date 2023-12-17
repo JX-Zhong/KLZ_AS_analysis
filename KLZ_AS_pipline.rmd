@@ -1,0 +1,705 @@
+---
+title: "KLZ_AS_pipline"
+author: "Jerax"
+date: "2023-12-16"
+output: html_document
+---
+
+### Basic procedure
+## Loading metagenomic data
+```{r setup, include=FALSE}
+setwd("~/Data/Other/KLZ_AS_DNA")
+pacman::p_load(tidyverse, reshape2,scales, ggpubr, psych, vegan, patchwork, ggsci,philentropy,phyloseq)
+abfv=read_delim("merge_reassign3.tsv",delim = "\t") %>% dplyr::select(!contains("NC")) %>% dplyr::select(!contains("H2O"),-KLZ_596,-KLZ_597,-KLZ_598)
+colnames(abfv)[1:4]=c("taxid","rank","tax_name","path")
+genus=filter(abfv,rank=="genus") %>% .[rowSums(.>2)>5,]%>% .[!duplicated(.$tax_name),] %>% dplyr::select(-KLZ_547)  %>% column_to_rownames("tax_name") %>% dplyr::select(-taxid,-rank,-path)  %>% as.matrix()%>% prop.table(.,2) %>% .[rowSums(.>0.01)>0,] %>% prop.table(.,2) %>% as.data.frame() %>% .[,metadata$Sample_ID]
+species=filter(abfv,rank=="species") %>%select(-KLZ_547) %>%  .[rowSums(.>2)>5,]%>% .[!duplicated(.$tax_name),] %>% column_to_rownames("tax_name") %>% dplyr::select(-taxid,-rank,-path) %>% as.matrix() %>% prop.table(.,2) %>% as.data.frame()
+pathway=read.delim("KLZ_AS_pathabundance_CPM.tsv",sep = "\t")%>% column_to_rownames("Pathway") %>% .[-c(1:2),] %>% as.matrix() %>%  as.data.frame() %>% dplyr::select(-KLZ_547)
+pathway_l2=read.delim("KLZ_pathabundance_filter_CPM.tsv.level_2.tsv",sep = "\t")%>% column_to_rownames("Pathway")  %>% as.data.frame() %>% dplyr::select(-KLZ_547) %>% .[,colnames(pathway)]
+
+```
+
+## Figure 1 Project design and an overview of the gut microbiota
+```{r}
+#Fig 1B
+#nmds analysis
+nmds1 <- metaMDS(JSD(t(genus)), k = 3, autotransform = FALSE)
+summary(nmds1)
+nmds1.stress <- nmds1$stress
+nmds1.point <- data.frame(nmds1$point)
+nmds1.species <- data.frame(nmds1$species)
+sample_site <- nmds1.point[1:2]
+rownames(sample_site)=colnames(genus)
+sample_site$Sample_ID <- rownames(sample_site)
+colnames(sample_site)[1:2] <- c('NMDS1', 'NMDS2')
+#合并分组数据
+sample_site <- right_join(metadata,sample_site)
+sample_site$CST[is.na(sample_site$CST)]="NC"
+sample_site$Death[is.na(sample_site$Death)]="2"
+df2 <- merge(sample_site, aggregate(cbind(mean.x = NMDS1, mean.y = NMDS2) ~ CST, sample_site, median), by = "CST")
+df2$Death=as.factor(df2$Death)
+
+fit <- envfit(nmds1,t(genus_all))
+fit_df <- data.frame((fit$vectors)$arrows, (fit$vectors)$r, (fit$vectors)$pvals) %>% rownames_to_column()
+colnames(fit_df)[4:5] <- c("r","p")
+ a=filter(fit_df,p<0.05) %>% arrange(desc(r)) %>% head(6) %>% .[,1]
+ fit_val <- vegan::scores(fit, display = c("vectors"))
+ fit_val <- fit_val*vegan::ordiArrowMul(fit_val,fill = 0.6)
+ fit_val1 <- fit_val %>% as.data.frame() %>%.[as.vector(a),] %>% rownames_to_column("tax")
+ cc=c(CST_color,"#191A1F")
+ names(cc)[8]="NC"
+ggplot(df2, aes(NMDS1, NMDS2)) +
+  geom_point(aes(fill = CST,shape=Death),size = 2.4,alpha=0.55) +
+    geom_segment(aes(x = mean.x, y = mean.y, xend = NMDS1, yend = NMDS2,color=CST), alpha = 0.15) +theme_bw()+
+  scale_shape_manual(values = c(23,24,21))+
+    geom_segment(data = fit_val1,aes(x=0,xend=NMDS1,y=0,yend=NMDS2),  arrow = arrow(length = unit(0.25, "cm")), colour = "grey30")+
+  ggrepel::geom_label_repel(data = fit_val1,aes(x=NMDS1,y=NMDS2),label=fit_val1$tax,show.legend = F, box.padding = 0.4, size = 4)+
+  stat_ellipse(data = df2 %>% filter(CST!="others"),aes(fill = CST), show.legend = T, geom = "polygon", alpha = 0.2, level = 0.90, type = "t", position = "identity")+
+  scale_fill_manual(values = cc)+scale_color_manual(values = cc)+
+  # geom_segment(aes(x=mean.x, y=mean.y, xend=PCoA1, yend=PCoA2))+
+ labs(x = 'NMDS axis1', y = 'NMDS axis2', title = paste('Stress =', round(nmds1$stress, 4)))
+
+# Fig 1C
+df=adonis2(JSD(t(genus %>% as.matrix())) ~ Age + Gender + CORTICOSTEROID + Death + Treatment  +COMORBIDITY+ Outcome28+antb_use, metadata, permutations = 1000,by = "margin")
+ggbarplot(df,"Var1","R2",fill = "Sig",palette="jco")+scale_fill_jama()+coord_flip()
+
+# Fig 1D
+library(scatterpie)
+## stastic transmission information
+dd=select(metadata,CST, sam2adm_correct,Outcome28) %>% dplyr::rename(PrevCST=CST,Prev_time=sam2adm_correct) %>%
+   group_by(PrevCST, Prev_time ,Outcome28) %>% summarise(n=n()) %>%
+   dcast(PrevCST+Prev_time~Outcome28 ,fill = 0)  %>%
+   mutate(across(c(PrevCST), ~as.numeric(factor(., levels = rev(clust_levels))))) %>%
+    mutate(across(c(Prev_time), ~as.numeric(factor(., levels =c(1,5,10,14,21)))))
+ dd$group=factor(1:nrow(dd))
+ dd$Sever=dd$`5`+dd$`6`+dd$`7`
+ dd$Mild=dd$`2`+dd$`3`+dd$`4`
+ dd$size=0.36
+ dd1=select(metadata,CST, sam2adm_correct,Death)%>%dplyr::rename(PrevCST=CST,Prev_time=sam2adm_correct) %>%
+    group_by(PrevCST, Prev_time ,Death)%>% summarise(n=n()) %>%  dcast(PrevCST+Prev_time~Death ,fill = 0) %>% mutate(across(c(PrevCST), ~as.numeric(factor(., levels = rev(clust_levels))))) %>%
+    mutate(across(c(Prev_time), ~as.numeric(factor(., levels =unique(nodes$time))))) 
+  dd1$group=factor(1:nrow(dd1)) 
+   dd1$size=0.2
+
+## part1
+p1=ggplot(dd,aes(Prev_time,Prev_CST))+
+    scale_x_continuous(breaks=c(1,2,3,4), labels=c("1", "5", "10","14")) + 
+    scale_y_continuous(breaks=c(1,2,3,4,5,6,7), labels=c("Enterococcus", "Bacteroides", "Escherichia","Corynebacterium","Veillonella","Prevotella","others") %>% rev) +
+    coord_fixed() +theme_bw()+
+    scale_fill_manual(values = c("#374E55","#DF8F44","grey80","#07A4DC"))+
+  geom_scatterpie(aes(x=Prev_time,y=PrevCST,group=group,r=size),
+                  data = dd %>% filter(Prev_time!=5),cols = c("Sever","Mild"),alpha=0.8)+
+  geom_scatterpie(aes(x=Prev_time,y=PrevCST,group=group,r=size),
+                  data = dd1 %>% filter(Prev_time!=5),cols = c("1","0"),alpha=1)
+
+##part2
+nodes <- metadata %>% count(sam2adm_correct,CST, name = "size_clust") %>% 
+   arrange(sam2adm_correct, desc(size_clust)) %>% 
+    mutate(clust = fct_rev(fct_inorder(CST)))
+colnames(nodes)=c("time","CST","size_clust","clust")
+ clust_levels <- CSTs
+ scaffold_df <- metadata %>% expand(Individual_ID, sam2adm_correct)
+ 
+ df=select(metadata,Sample_ID,PrevSampleID,PrevCST,CST,sam2adm_correct) %>% filter(!is.na(PrevCST))
+ df$Prev_time=metadata[df$PrevSampleID,"sam2adm_correct"]
+ meta_edge=df %>% unite(trans, c("PrevCST", "CST"), sep="~") %>%
+   unite(time_int, c("Prev_time", "sam2adm_correct"), sep="~") %>%
+    count(time_int, trans, name = "edge") %>% 
+    separate(trans, c("clust", "clust_t1"), sep = "~") %>%
+    separate(time_int, c("time", "time_t1"), sep = "~") %>%
+   mutate(across(c(clust, clust_t1), ~factor(., levels = clust_levels))) %>%
+    mutate(across(c(time, time_t1), ~factor(., levels =unique(nodes$time)))) %>%
+      group_by(time)
+   
+ meta_edge  <- meta_edge  %>% filter(!time==time_t1) %>% group_by(time,clust) %>% mutate(total_trans = sum(edge))%>%mutate(perc = edge/total_trans) %>% as.data.frame() %>% filter(edge>2)
+ 
+  edges_gg <-meta_edge %>%
+    arrange(perc) %>%
+    ggplot(aes(x=time, xend=time_t1, y=factor(clust,levels = rev(CSTs)), yend=clust_t1, size=edge, color=perc)) +
+    geom_segment() + 
+    scale_y_discrete(drop=FALSE) +
+    scale_x_discrete(drop=FALSE, position = "top") +
+    scale_colour_gradientn(colors = colorRampPalette(RColorBrewer::brewer.pal(9, "Greys"))(20)[3:16], limits=c(0.049,0.6), oob = scales::squish, name="Transition\nfrequency", breaks=c(0.05, 0.2, 0.4, 0.55), labels=c("<4%", "20%", "40%", ">55%")) +
+    scale_size_continuous(guide=F, range=c(0.3,7.5)) + 
+    xlab("Time point") + ylab("Cluster") +theme_bw()+
+    theme(panel.grid.major.y = element_blank(),axis.text.x = element_text(size=14,colour = "black"),axis.text.y = element_text(size=14,color = "black"))
+  
+  ll=unique(nodes$time)
+ nodes_gg <- nodes %>%
+    ggplot(aes(x=factor(time,levels = ll), y=factor(clust,levels = rev(CSTs)), size=size_clust, fill=clust)) +
+    geom_point(shape=21) +
+    scale_y_discrete(drop=FALSE) +
+    scale_fill_manual(values=CST_color) +
+    theme_minimal(base_family=theme_get()$text$family) +
+    theme(panel.grid = element_blank(), panel.background = element_blank()) +
+    scale_size_continuous(range=c(2, 16)) + 
+    scale_x_discrete(position = "top", drop = F) +
+    xlab(NULL) + ylab(NULL) +#theme_bw()+
+    theme(legend.position = "none", panel.background = element_blank(), strip.text= element_text(color = "transparent"),axis.text.x = element_text(size=14,colour = "black"),axis.text.y = element_text(size=14,color = "black"))
+ library(cowplot)
+aligned_plots <- align_plots(edges_gg, nodes_gg, align = "hv", axis = "tblr")
+  p_comb <- ggdraw(aligned_plots[[1]]) + draw_plot(aligned_plots[[2]]) 
+## merge 2 part plot  
+  library(cowplot)
+ plot_grid(p_comb,p1, align = "hv", axis = "tb",rel_widths = c(3,2))
+
+ 
+ 
+```
+ 
+## Figure S1 Alterations in gut microbiome composition of severe COVID-19 patients
+```{r}
+## Fig S1A
+library(ComplexHeatmap)
+dd1 <- genus %>% apply(.,2,function(x) x/sum(x))
+dd2 <- dd1[order(rowSums(dd1), decreasing = T), ]
+dd3 <- dd2 %>%
+  as.data.frame() %>%
+  rownames_to_column("taxname")
+dd3$taxname[16:nrow(dd3)] <- "Others"
+dd4 <- dd3 %>% 
+  group_by(taxname) %>%
+  summarise_each(funs = sum) %>%
+  as.data.frame()
+dd4$taxname <- factor(dd4$taxname, levels = rev(dd3$taxname[1:16]))
+dd4 <- dd4 %>% melt(variable.name="Sample_ID") %>% right_join(dd,.)
+dd$CST <- factor(dd$CST,levels = c(CSTs,"HC"))
+dd$domain=NA
+for (i in dd$Sample_ID) {
+  if (!(as.character(dd[i,"CST"]) %in% c("HC","others"))) {
+    dd[i,"domain"]=genus[dd[i,"CST"] %>% as.character(),i]
+  }
+}
+dd <- dd %>% arrange(CST,Death,desc(domain))
+dd4$Sample_ID=factor(dd4$Sample_ID,levels = dd$Sample_ID)
+dd4$taxname=factor(dd4$taxname,levels = rev(names(pp)))
+ pp=1:16
+ names(pp)=dd3$taxname[1:16]
+ pp[1:6]=CST_color[1:6]
+pp[7:16]=sample(phylum_colors,10)
+p1=ggplot(dd4) +
+  geom_bar(aes(x = Sample_ID, y = value, fill = taxname),width=2, stat = "identity") +
+  #scale_fill_manual(values = inlmisc::GetColors(16, scheme = "discrete rainbow") %>% as.character(), name = "Taxonomy") +
+  scale_fill_manual(values = rev(pp) , name = "Taxonomy") +
+  theme_bw() +theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), plot.margin = unit(c(0, 0, 0, 0), "cm"))+
+  #theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+  scale_y_continuous(expand = c(0, 0.01), name = "Proportion") +
+  xlab("")
+
+p2=grid.draw(get_legend(p1)) 
+
+
+p=ggplot(dd4) +
+    geom_bar(aes(x = Sample_ID, y = value, fill = taxname),width=2, stat = "identity") +
+    #scale_fill_manual(values = inlmisc::GetColors(16, scheme = "discrete rainbow") %>% as.character(), name = "Taxonomy") +
+    scale_fill_manual(values = rev(pp) , name = "Taxonomy") +
+    theme_bw() +theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), plot.margin = unit(c(0, 0, 0, 0), "cm"),legend.position = "none")+
+    #theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    scale_y_continuous(expand = c(0, 0.01), name = "Proportion") +
+    xlab("")
+
+col_fun = colorRamp2(c(2,3, 4,5,6, 7), c( "#FDE725FF","#7AD151","#22A884","#2A788E","#414487","#440154"))
+
+ha = HeatmapAnnotation(
+  Death=dd$Death,
+  Severity=dd$Outcome28,
+  CST = dd$CST, 
+  col = list(Severity = col_fun,
+               CST = c("Enterococcus" = "#0073C2FF", "Bacteroides" = "#EFC000FF","Escherichia"="#868686FF", "Corynebacterium" = "#CD534CFF", "Veillonella" = "#7AA6DCFF", "Prevotella" = "#003C67FF", "others" = "#8F7700FF",HC="#38B6E3"),
+               Death=c("0"="#374E55","1"="#DF8F44")
+    ),
+  ggplot=anno_empty(height = unit(12, "cm")),
+  border = TRUE,
+  show_legend = c(TRUE, TRUE, TRUE),
+  show_annotation_name = TRUE,
+  annotation_legend_param = list(
+    Death=list(tittle="Clinical outcome" ),
+    Severity=list(tittle= "Severity"),
+    CST=list(tittle= "Cluster ")
+  ))
+Heatmap(t(dd$Age),cluster_columns = F,top_annotation = ha,show_heatmap_legend = F)
+decorate_annotation("ggplot", {
+    vp = current.viewport()$name
+    print(p, vp = vp)
+})
+
+ht_list <- Heatmap(t(dd$Age),cluster_columns = F,top_annotation = ha,show_heatmap_legend = F)
+ht_list1 <-grid.grabExpr(draw(ht_list,  annotation_legend_side = "bottom", heatmap_legend_side = "left"))
+plot_grid(ht_list1, p, ncol = 1,axis = "lrt",rel_heights = c(1:5))
+p=ggplot(dd4) +
+    geom_bar(aes(x = variable, y = value, fill = taxname),width=2, stat = "identity") +
+    #scale_fill_manual(values = inlmisc::GetColors(16, scheme = "discrete rainbow") %>% as.character(), name = "Taxonomy") +
+    scale_fill_manual(values = ll1 , name = "Taxonomy") +
+    theme_bw() +theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), plot.margin = unit(c(0, 0, 0, 0), "cm"))+
+    #theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    scale_y_continuous(expand = c(0, 0.01), name = "Proportion") +
+    xlab("")
+
+df=fig1.data
+p1=ggplot(df,aes(x=reorder(Sample_ID,rownames(df))))+geom_bar(aes(fill=CST),width = 2)+scale_fill_manual(values =CST_color)+theme(legend.position = "none",axis.text.x = element_blank(), axis.ticks.x = element_blank(),axis.text.y = element_blank(), axis.ticks.y = element_blank())+xlab("")+ylab("")
+p2=ggplot(df,aes(x=reorder(Sample_ID,rownames(df))))+geom_bar(aes(fill=Outcome28),width = 2)+scale_fill_viridis_c(direction = -1)+theme(legend.position = "right",axis.text.x = element_blank(), axis.ticks.x = element_blank(),axis.text.y = element_blank(), axis.ticks.y = element_blank())+xlab("")+ylab("")
+p3=ggplot(df,aes(x=reorder(Sample_ID,rownames(df))))+geom_bar(aes(fill=Death),width = 2)+scale_fill_manual(values = Death_color)+theme(legend.position = "none",axis.text.x = element_blank(), axis.ticks.x = element_blank(),axis.text.y = element_blank(), axis.ticks.y = element_blank())+xlab("")+ylab("")
+plot_grid(p3,p2,p1,p,ncol = 1,rel_heights =c(1,1,1,6),align = "v",axis = "tblr")
+
+
+##Fig S1B
+library(gtools)
+##ALL comparison
+library(multcompView)
+df=genus %>% rownames_to_column("tax") %>% full_join(rownames_to_column(wh_hc_genus,"tax" ),., ) %>% column_to_rownames("tax")
+df[is.na(df)]=0
+dd=data.frame(Sample_ID=colnames(df)) %>% right_join(metadata1,.)
+dd$gen_shannon <-  vegan::diversity(df[,dd$Sample_ID],MARGIN = 2,index = "shannon")
+dd$CST[is.na(dd$CST)]="HC"
+anova <- aov(gen_shannon ~ CST, data = dd)
+tukey <- TukeyHSD(anova)
+cld <- multcompLetters4(anova, tukey)
+aa=cld$CST$Letters %>% as.data.frame() %>% rownames_to_column("CST")
+colnames(aa)[2]="sig"
+ll=combinations(7,2,CSTs,repeats.allowed = F) %>%as.data.frame() %>%
+  split(.,1:dim(.)[1]) %>% lapply(.,as.character)
+## Siginificant comparison
+compare_means(spe_shannon~CST,metadata) %>% filter(p.adj<0.05) %>% select(2,3) %>%
+  as.data.frame() %>% split(.,1:dim(.)[1]) %>% lapply(.,as.character)
+
+ll=c(CSTs[1],CSTs[4],CSTs[3],CSTs[5],CSTs[2],CSTs[6],CSTs[7],"HC")
+dd$CST=factor(dd$CST,levels = ll)
+ggplot(dd,aes(x=factor(CST),gen_shannon,color=CST))+ geom_quasirandom(dodge.width=1,size=1.5)+
+    scale_color_manual(values = CST_color1)+
+    stat_summary(aes(group = CST), fun = median,
+                 fun.min = median, fun.max = median,
+                 geom = "crossbar", color = "black", width = 0.5, lwd = 0.2)+theme_bw()+
+    theme(axis.text.x = element_text(angle = 45, hjust = 1,size=14,colour = "black"),axis.text.y = element_text(size=13,color = "black"),
+          axis.ticks.x = element_blank(), plot.margin = unit(c(0, 0, 0, 0), "cm"))+geom_text(aes(label = sig, y = 3), vjust = -0.4,size=6,data = aa,show.legend = F) 
+
+## Fig S1C
+ ggboxplot(metadata,"death","shannon",color = "Death",size = 2)+stat_compare_means()
+## Fig S1D
+ # LefSe analysis in online galaxy website
+## Fig S1E
+  ggboxplot(metadata,"period","JSD_prev",color = "period")+stat_compare_means()
+## Fig S1F
+dd1 <- genus[,filter(metadata,CST=="other") %>% rownames]  %>% apply(.,2,function(x) x/sum(x))
+dd2 <- dd1[order(rowSums(dd1), decreasing = T), ]
+dd3 <- dd2 %>%
+  as.data.frame() %>%
+  rownames_to_column("taxname")
+dd3$taxname[16:nrow(dd3)] <- "Others"
+dd4 <- dd3 %>% 
+  group_by(taxname) %>%
+  summarise_each(funs = sum) %>%
+  as.data.frame()
+dd4$taxname <- factor(dd4$taxname, levels = rev(dd3$taxname[1:16]))
+dd4 <- dd4 %>% melt()
+
+ggplot(dd4) +
+  geom_bar(aes(x = variable, y = value, fill = taxname), stat = "identity") +
+  #scale_fill_manual(values = inlmisc::GetColors(16, scheme = "discrete rainbow") %>% as.character(), name = "Taxonomy") +
+  scale_fill_manual(values = phylum_colors , name = "Taxonomy") +
+  theme_bw() +theme(axis.text.x = element_text(angle = 90, hjust = 1), axis.ticks.x = element_blank(), plot.margin = unit(c(0, 0, 0, 0), "cm"))+
+  #theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+  scale_y_continuous(expand = c(0, 0.01), name = "Proportion") +
+  xlab("")
+```
+
+## Figure 2 Gut microbiota differences between recovered and deceased patients.
+```{r}
+## DA analysis by zicoseq
+library(GUniFrac)
+ll=rownames(metadata)
+input_data <- genus[,ll] %>% .[rowSums(.>0.01)>0,]
+metadata_curated <- metadata_arg[colnames(input_data),] %>% select(Individual_ID,Gender,Age,Treatment,Death,CORTICOSTEROID,COMORBIDITY,sam2adm,ANTIBODY,rownames(Igg),rownames(cytokine),rownames(blood),antb_use,Outcome28)
+metadata_curated$Death=as.factor(metadata_curated$Death)
+metadata_curated$Gender=as.factor(metadata_curated$Gender)
+metadata_curated$Treatment=as.factor(metadata_curated$Treatment)
+metadata_curated$CORTICOSTEROID=as.factor(metadata_curated$CORTICOSTEROID)
+metadata_curated$COMORBIDITY=as.factor(metadata_curated$COMORBIDITY)
+ZicoSeq.obj <- ZicoSeq(meta.dat = metadata_curated, feature.dat = as.matrix(input_data), 
+                    grp.name = 'Death', adj.name = c("Age","Gender","Tazobactam_time","Outcome28" ,"CORTICOSTEROID"),
+                    feature.dat.type = "proportion",
+                    prev.filter = 0.1, mean.abund.filter = 0,  max.abund.filter = 0.002, min.prop = 0, 
+                    is.winsor = TRUE, outlier.pct = 0.03, winsor.end = 'top',
+                    is.post.sample = FALSE, post.sample.no = 25, 
+                    link.func = list(function (x) x^0.5, function (x) x^0.25), stats.combine.func = max,
+                    perm.no = 999,  strata =NULL , 
+                    ref.pct = 0.5, stage.no = 6, excl.pct = 0.2,
+                    # Family-wise error rate control
+                    is.fwer = TRUE, verbose = TRUE, return.feature.dat = T)
+## Fig2A
+ZicoSeq.plot(ZicoSeq.obj, pvalue.type = 'p.adj.fdr', cutoff = 0.05)
+
+## Fig2B
+input_data <- pathway[,ll]
+ZicoSeq.obj <- ZicoSeq(meta.dat = metadata_curated, feature.dat = as.matrix(input_data), 
+                    grp.name = 'Death', adj.name = c("Age","Gender","Tazobactam_time","Outcome28" ,"CORTICOSTEROID"),
+                    feature.dat.type = "other",
+                    prev.filter = 0, mean.abund.filter = 0,  max.abund.filter = 0, min.prop = 0, is.winsor = TRUE, outlier.pct = 0.03, winsor.end = 'top',
+                    is.post.sample = FALSE, post.sample.no = 25, 
+                     link.func = list(function (x) x), stats.combine.func = max,
+                    perm.no = 999,  strata =NULL , 
+                    ref.pct = 0.5, stage.no = 6, excl.pct = 0.2,
+                    # Family-wise error rate control
+                    is.fwer = TRUE, verbose = TRUE, return.feature.dat = T)
+## Fig2B
+ZicoSeq.plot(ZicoSeq.obj, pvalue.type = 'p.adj.fdr', cutoff = 0.05)
+
+## Fig2C
+ll=map_t1$Sample_ID
+ df2 <- JSD(t(genus[,ll] %>% as.matrix() %>% prop.table(.,2)))
+ colnames(df2) <- ll
+ rownames(df2) <- ll
+ anosim(as.matrix(distance)[ll,ll],map_t1$Death)
+ 
+nmds1 <- metaMDS(df2, k = 3, autotransform = FALSE)
+summary(nmds1)
+
+nmds1.stress <- nmds1$stress
+nmds1.point <- data.frame(nmds1$point)
+nmds1.species <- data.frame(nmds1$species)
+sample_site <- nmds1.point[1:2]
+rownames(sample_site)=colnames(df2)
+sample_site$Sample_ID <- rownames(sample_site)
+colnames(sample_site)[1:2] <- c('NMDS1', 'NMDS2')
+sample_site <- right_join(metadata,sample_site)
+df2 <- merge(sample_site, aggregate(cbind(mean.x = NMDS1, mean.y = NMDS2) ~ CST, sample_site, median), by = "CST")
+df2$Death=as.factor(df2$Death)
+ggplot(df2, aes(NMDS1, NMDS2)) +
+    geom_point(aes(fill = Death),size = 2.4,alpha=0.55)  +theme_bw()+
+    geom_segment(data = df2,aes(x=mean.x,xend=NMDS1,y=mean.y,yend=NMDS2), colour = "grey30")+
+    # geom_segment(aes(x=mean.x, y=mean.y, xend=PCoA1, yend=PCoA2))+
+    labs(x = 'NMDS axis1', y = 'NMDS axis2', title = paste('Stress =', round(nmds1$stress, 4)))
+
+
+### network analysis
+library(NetCoMi)
+ll=map_t1 %>% filter(Death==1) %>% rownames()
+OTU = otu_table(genus[,map_t2$Sample_ID] %>% .[rowSums(.>0.01)>2,ll], taxa_are_rows = TRUE)
+ps1 = merge_phyloseq(OTU,sample_data(metadata[ll,]))
+ll=map_t1 %>% filter(Death==0) %>% rownames()
+OTU = otu_table(genus[,map_t2$Sample_ID] %>% .[rowSums(.>0.01)>2,ll], taxa_are_rows = TRUE)
+ps0 = merge_phyloseq(OTU,sample_data(metadata[ll,]))
+
+
+# Network construction
+net_season <- netConstruct(data = ps0, 
+                           data2 = ps1,  
+                           filtTax = "highestVar",
+                           filtTaxPar = list(highestVar = 70),
+                           filtSamp = "none",
+                           measure = "spring",
+                           measurePar = list(nlambda=10, 
+                                             rep.num=10),
+                           normMethod = "none", 
+                           zeroMethod = "none",
+                           sparsMethod = "none", 
+                           dissFunc = "signed",
+                           verbose = 2,
+                           seed = 123456)
+
+
+
+props_season <- netAnalyze(net_season, 
+                           centrLCC = FALSE,
+                           avDissIgnoreInf = TRUE,
+                           sPathNorm = FALSE,
+                           clustMethod = "cluster_fast_greedy",
+                           hubPar = c("degree", "eigenvector"),
+                           hubQuant = 0.9,
+                           lnormFit = TRUE,
+                           normDeg = FALSE,
+                           normBetw = FALSE,
+                           normClose = FALSE,
+                           normEigen = FALSE)
+
+plot(props_season, 
+     sameLayout = TRUE, 
+     repulsion = 0.95,
+     layoutGroup = "union",
+     rmSingles = "inboth", 
+     nodeSize = "mclr", 
+     labelScale = FALSE,
+     cexNodes = 1.3, 
+     cexLabels = 1.2,
+     cexHubLabels = 1.7,
+     cexTitle = 2.1,
+     groupNames = c("Recovered", "Deceased"),
+     hubBorderCol  = "gray40")
+
+legend("bottom", title = "estimated association:", legend = c("+","-"), 
+       col = c("#009900","red"), inset = 0.02, cex = 3, lty = 1, lwd = 3, 
+       bty = "n", horiz = TRUE)
+```
+
+## Figure S2 Gut microbiota differences between recovered and deceased patients.
+```{r}
+ ## The code of Fig S2A same as Fig 2C, using admission sample
+
+ ## The code of Fig S2BC same as Fig 2AB ,using discharge/death sample
+
+ ## Fig S2D
+library(NetCoMi)
+ll=map_t2 %>% filter(Death==1) %>% rownames()
+OTU = otu_table(genus[,map_t2$Sample_ID] %>% .[rowSums(.>0.01)>2,ll], taxa_are_rows = TRUE)
+ps1 = merge_phyloseq(OTU,sample_data(metadata[ll,]))
+ll=map_t2 %>% filter(Death==0) %>% rownames()
+OTU = otu_table(genus[,map_t2$Sample_ID] %>% .[rowSums(.>0.01)>2,ll], taxa_are_rows = TRUE)
+ps0 = merge_phyloseq(OTU,sample_data(metadata[ll,]))
+
+
+# Network construction
+net_season <- netConstruct(data = ps0, 
+                           data2 = ps1,  
+                           filtTax = "highestVar",
+                           filtTaxPar = list(highestVar = 70),
+                           filtSamp = "none",
+                           measure = "spring",
+                           measurePar = list(nlambda=10, 
+                                             rep.num=10),
+                           normMethod = "none", 
+                           zeroMethod = "none",
+                           sparsMethod = "none", 
+                           dissFunc = "signed",
+                           verbose = 2,
+                           seed = 123456)
+
+
+
+props_season <- netAnalyze(net_season, 
+                           centrLCC = FALSE,
+                           avDissIgnoreInf = TRUE,
+                           sPathNorm = FALSE,
+                           clustMethod = "cluster_fast_greedy",
+                           hubPar = c("degree", "eigenvector"),
+                           hubQuant = 0.9,
+                           lnormFit = TRUE,
+                           normDeg = FALSE,
+                           normBetw = FALSE,
+                           normClose = FALSE,
+                           normEigen = FALSE)
+
+plot(props_season, 
+     sameLayout = TRUE, 
+     repulsion = 0.95,
+     layoutGroup = "union",
+     rmSingles = "inboth", 
+     nodeSize = "mclr", 
+     labelScale = FALSE,
+     cexNodes = 1.3, 
+     cexLabels = 1.2,
+     cexHubLabels = 1.7,
+     cexTitle = 2.1,
+     groupNames = c("Recovered", "Deceased"),
+     hubBorderCol  = "gray40")
+
+legend("bottom", title = "estimated association:", legend = c("+","-"), 
+       col = c("#009900","red"), inset = 0.02, cex = 3, lty = 1, lwd = 3, 
+       bty = "n", horiz = TRUE)
+```
+
+## Figure 3 Immunological and hematological parameters correlated with clinical outcomes in COVID-19 patients
+```{r}
+##Fig 3 AB
+library(PResiduals)
+z.meta <- select(metadata,Age,Tazobactam_time,Gender,Outcome28,Death,Individual_ID)
+ll1=intersect(metadata%>% rownames(),colnames(genus)) %>% intersect(.,colnames(cytokine))
+df1=df2=1:27
+names(df2)=names(df1)=rownames(cytokine)
+for (i in rownames(cytokine)) {
+    cc <- partial_Spearman(get(i)|Outcome28~Age+Gender+Tazobactam_time,data=d)
+    df1[i] <- cc$TS$TB$ts
+    df2[i] <- cc$TS$TB$pval
+}
+df2=p.adjust(df2,method = "fdr")
+
+z.meta <- select(metadata,Age,Tazobactam_time,Gender,Outcome28,Death,Individual_ID)
+ll1=intersect(metadata%>% rownames(),colnames(genus)) %>% intersect(.,colnames(blood))
+df1=df2=1:17
+names(df2)=names(df1)=rownames(blood)
+for (i in rownames(blood)) {
+    cc <- partial_Spearman(get(i)|Outcome28~Age+Gender+Tazobactam_time,data=d)
+    df1[i] <- cc$TS$TB$ts
+    df2[i] <- cc$TS$TB$pval
+}
+df2=p.adjust(df2,method = "fdr")
+
+ggbarplot(data.frame(Var1=rownames(cytokine),value=df1,Var2=df2),"Var1","value",fill = "Var2")+coord_flip()
+
+## Fig3 C-M
+library(lsmeans)
+library(sjPlot)
+df=t(cytokine) %>% as.data.frame()
+  df$sam2adm=metadata[rownames(df),"sam2adm"]
+  df$Death=metadata[rownames(df),"Death"]
+  df$Individual_ID=metadata[rownames(df),"Individual_ID"]
+  df$n_sample=metadata[rownames(df),"n_sample"]
+  df[,1:27]=log10(df[,1:27])
+  df=filter(df,n_sample>1)
+  cc=list()
+  pp=list()
+  for (i in rownames(cytokine)) {
+    fm <- lmerTest::lmer(get(i) ~ sam2adm*Death+(1 | Individual_ID),data=df  )
+    pp[[i]] <- summary(fm)[[10]][3,5]
+    # Obtain slopes
+    mm=lstrends(fm,"Death","sam2adm")
+    # Compare slopes
+    trend=pairs(mm)
+    p=trend %>% as.data.frame() %>% .[,6]
+    cc[[i]]=p
+  }
+  ll1=unlist(pp) %>% p.adjust(.,method ="fdr" )  %>% .[.<0.05]
+  ll=cc %>% unlist() %>% p.adjust(.,method ="fdr") %>% .[.<0.05]
+  ll=intersect(names(ll),names(ll1))
+p=list()
+  for (i in ll) {
+    fm <- lmerTest::lmer(get(i) ~ sam2adm*Death+(1 | Individual_ID),data=df)
+    print(i)
+    summary(fm)[[10]][3,5]
+     dd<-  plot_model(fm, type = "pred", terms = c('sam2adm', 'Death'), show.data=T,colors = Death_color)+theme_bw()+xlab("Days form  sampling to Admission")+ylab("Log10 concentration (pg/ml)")+ggtitle(i)+theme(legend.position = "none")
+     dd$layers[[2]]$aes_params$size=1.3
+     dd$layers[[1]]$aes_params$size=2
+     dd$layers[[1]]$aes_params$alpha=0.3
+    p[[i]]=dd
+  }
+pdf("trends_b.pdf",width = 8.5,height = 8)
+cowplot::plot_grid(plotlist = p,nrow = 3,ncol = 3,align = "hv")
+dev.off()
+
+```
+
+## Figure S3 Associations of gut microbial with host cytokines and hematological parameters
+```{r}
+## Fig S3A
+ll=intersect(colnames(cytokine_clr),colnames(genus_clr))
+mantel(vegdist(t(blood[,ll]), method = "bray") ,vegdist(t(pathway1[,ll]), method = "bray"),method = "spearman")
+mantel(vegdist(t(cytokine[,ll]), method = "bray") ,vegdist(t(pathway1[,ll]), method = "bray"))
+mantel_data=df %>% column_to_rownames("X")
+pheatmap::pheatmap(mantel_data, display_numbers = TRUE, number_format = "%.2f", cellwidth=24,cluster_col = FALSE, cluster_row = FALSE, cellheight=24,fontsize_row=15,fontsize_col=15,color = colorRampPalette(c("white", "#6DAFD6","#074594"))(length(bk)),breaks = bk,na_col = "white")
+
+## Fig S3B-E
+z.meta <- select(metadata,Age,Tazobactam_time,Gender,Outcome28,Death,Individual_ID)
+ll1=intersect(metadata%>% rownames(),colnames(genus)) %>% intersect(.,colnames(cytokine))
+dd=cytokine[,ll1]
+df=corr.test(t(dd[,ll1]),t(blood_clr[,ll1]),method = "spearman")
+df1=df$r
+df2=df$p
+d <- cbind(t(dd[,ll1]),t(blood_clr[,ll1]),z.meta[ll1,])
+d$Death <- as.factor(d$Death)
+d$Treatment <- as.factor(d$Treatment)
+d$Gender <- as.factor(d$Gender)
+for (i in colnames(df1)) {
+  for (j in rownames(df1)) {
+    cc <- partial_Spearman(get(i)|get(j)~Age+Outcome28+Gender+Ceftazidime_time+Tazobactam_time,data=d)
+    df1[j,i] <- cc$TS$TB$ts
+    df2[j,i] <- cc$TS$TB$pval
+  }}
+dd1=df1[rowSums(abs(df1)>0.15)>0,colSums(abs(df1)>0.15)>0]
+dd2=df2[rownames(dd1),colnames(dd1)] %>% as.matrix() %>% apply(., 1,function(x){p.adjust(x,method = "fdr")}) %>% t %>% as.data.frame()
+dd2=dd2[rowSums(dd2<0.05)>0,colSums(dd2<0.05)>0,drop=F]
+dd1=df1[rownames(dd2),colnames(dd2)]
+dd2[abs(dd1)<0.15]=0.1
+bk <- seq(-0.3,0.3, length.out =100)
+
+pheatmap::pheatmap(dd1,
+         color = colorRampPalette(rev(RColorBrewer::brewer.pal(n =8, name = "RdBu")))(length(bk)),display_numbers = matrix(ifelse(dd2< 0.05, "*", ""),nrow(dd2)),breaks = bk)
+```
+
+## Figure 4 Performance and discriminative features of random-forest classifiers for predicting clinical outcome
+## Figure S4 Performance and discriminative features of random-forest classifiers for predicting clinical outcome.
+```{r}
+library(randomForestSRC)
+library(imbalance)
+library(pROC)
+library(latex2exp)
+library(modelr)
+library(MLmetrics)
+
+
+dd=rbind(genus_clr[,],cytokine_clr[,],blood_clr[,]) %>% as.data.frame()
+dd1=dd[ll1,rownames(genus)[dd.vsurf.gen$varselect.pred]]
+dd=rbind(genus_clr[tt,tt1],cytokine_clr[,tt1],blood_clr[,tt1])
+
+ll1=intersect(colnames(cytokine),map_t1$Sample_ID)
+dd=microbiome::transform(genus[,ll1],"clr") %>% t() %>% as.data.frame()
+dd$Death <- as.factor(map_t1[rownames(dd), "Death"] %>% as.character())
+f <- as.formula(Death ~ .)
+#trn <- sample(1:nrow(dd), size = 130, replace = FALSE)
+ # newd.50 <- mwmote(dd[trn, ], numInstances = 50, classAttr = "Class")
+  newd.100 <- mwmote(dd, numInstances = 75, classAttr = "Death")
+ # o.with.100 <- imbalanced(f, rbind(dd[trn, ], newd.100), method = "brf", perf.type = "g.mean")   
+  # print(predict(o.with.100, dd[-trn, ]))
+
+df=rbind(dd, newd.100)
+
+library(VSURF)
+ll=list()
+for (i in 1:1000) {
+  dd.vsurf <- VSURF(df[,1:125], df[,126],parallel = T,ncores = 5) 
+  ll[[i]] =c(colnames(dd)[dd.vsurf$varselect.pred])
+}
+ll=do.call(c,ll) %>% table() %>% sort(decreasing = T) %>% .[.>4] %>% names()
+
+#dd.vsurf <- VSURF(df[,1:27], df[,27], ntree = 3000,mtry = 50, nfor.thres = 20, nfor.interp = 10, nfor.pred = 10,parallel = T,ncores = 4) 
+ll=c(ll,"Death");ll
+
+##tpr fpr
+auc=list()
+sensitivities=list()
+specificities=list()
+im=list()
+f1_scores=list()
+precision=list()
+recall=list()
+accuracy=list()
+for (i in 1:100) {
+  trn <- sample(1:nrow(dd), size = 100, replace = FALSE)
+ # newd.50 <- mwmote(dd[trn, ], numInstances = 50, classAttr = "Class")
+  newd.100 <- mwmote(dd[trn, ll], numInstances = 75, classAttr = "Death")
+  o.with.100 <- imbalanced(f, rbind(dd[trn, ll], newd.100), importance = TRUE,splitrule = "auc")   
+  im[[i]]=o.with.100$importance %>%as.data.frame() %>%  select(1)
+   df=(predict(o.with.100, dd[-trn, ll]))
+  rocobj <- roc(dd[-trn, "Death"], df$predicted[,2])
+  mm=approx(sort(1-rocobj$specificities,decreasing = T),sort(rocobj$sensitivities,decreasing = T),method = "linear",n = 101) %>% as.data.frame()
+  f1_scores[[i]] <- get.imbalanced.performance(df)["F1"]
+  precision[[i]] <- get.imbalanced.performance(df)["prec"]
+  recall[[i]] <- Recall(dd[-trn, "Death"], ifelse(df$predicted[,2] >= get.imbalanced.performance(df)["threshold"], 1, 0), positive = 1)
+  accuracy[[i]] <- Accuracy(ifelse(df$predicted[,2] >= get.imbalanced.performance(df)["threshold"], 1, 0),dd[-trn, "Death"])
+  sensitivities[[i]]=mm$y
+  specificities[[i]]=mm$x
+  auc[[i]]=get.imbalanced.performance(df)["auc"] 
+}
+im_all=do.call(cbind,im) %>% as.data.frame() %>% rownames_to_column("tax") %>% melt()
+mm=im_all %>% dplyr::group_by(tax) %>% dplyr::summarise(mm=median(value)) %>% arrange(mm) %>% as.data.frame() %>% .[,1]
+df=dd[,ll] %>% rownames_to_column("tax") %>% melt()
+rf_f=df %>% compare_means(value~Death,data = .,group.by = "variable",) %>% filter(p<0.05) %>% as.data.frame()%>% .[,1] %>% as.character()
+##Compare abundance between deceased and recovered
+cc=filter(df,variable %in% rf_f) %>% group_by(variable,Death) %>% summarise(mm=median(value)) %>% dcast(variable~Death) %>% mutate(group=ifelse(`0`>`1`,"down","up"))
+im_all$group=ifelse(im_all$tax %in% (cc %>% filter(group=="up") %>% .[,1] %>% as.character()),"Overrepresented",ifelse(im_all$tax %in%( cc %>% filter(group=="down") %>% .[,1] %>% as.character()),"Underrepresented","Not significant"))
+im_all$group=factor(im_all$group,levels = c("Overrepresented","Underrepresented","Not significant"))
+
+ggboxplot(im_all,"tax","value",order = mm,fill = "group")+coord_flip()+scale_fill_manual(values = c("Overrepresented"="#DF8F44","Underrepresented"="#374E55","Not significant"="#BEBDCC"))+ylab("Feature importance")+theme_cleveland()+theme(legend.position =c(0.9,0.3))
+
+model_bg_para <-  data.frame(f1_scores=unlist(f1_scores),precision=unlist(precision),recall=unlist(recall),accuracy=unlist(accuracy),auc=unlist(auc))
+unlist(auc) %>% summary
+
+r1=do.call(rbind,sensitivities) 
+r2=do.call(rbind,specificities)
+r2[,1]=0
+r1[,1]=0
+r2[,101]=1
+r1[,101]=1
+r1_sd=apply(r1,2,sd)
+r2_sd=apply(r2,2,sd)
+r1_upper=cbind(colMeans(r1)+r1_sd,1) %>% apply(.,1,min)
+r1_lower=cbind(colMeans(r1)-r1_sd,0) %>% apply(.,1,max)
+
+df=cbind(colMeans(r1),colMeans(r2),r1_upper,r1_lower) %>% as.data.frame()
+colnames(df)[1:2]=c("r1","r2")
+
+ggplot(df[,])+geom_line(aes(r2,r1),color="#0068FF",size=1.5)+
+  #+geom_step(aes(r2,r1),color="#7474F1",size=1.5)+
+  geom_ribbon(aes(x=r2,ymin=r1_lower,ymax=r1_upper),alpha=.25,fill="grey50")+
+  theme_bw()+xlab("1-Specificity")+ylab("Sensitivity")+
+  # geom_segment(aes(x = 0, y = 0, xend = 1, yend =1),linetype=2,color="#D9352A")+
+  annotate('rect',xmin=0.28,xmax=0.92,ymin=0.05,ymax=0.15,size=0.5,fill="white",color="black")+
+  annotate("text",x=0.6,y=0.1,label=TeX(paste0("AUC = ",round(bayestestR::auc(df$r2,df$r1),digits = 2),"$\\pm$",sd(unlist(auc)%>% na.omit()) %>% round(.,digits = 2))),size=7)+ theme(axis.text=element_text(size=14),axis.title=element_text(size=16,face="bold"))
+```
